@@ -2,23 +2,61 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"os/exec"
 	"runtime"
+	"time"
 
 	"github.com/mark3labs/mcp-go/client"
+	"github.com/mark3labs/mcp-go/client/transport"
 	"github.com/mark3labs/mcp-go/mcp"
 )
 
 const (
 	// Replace with your MCP server URL
-	serverURL = "https://api.example.com/v1/mcp"
+	serverURL = "http://localhost:8090/mcp"
 	// Use a localhost redirect URI for this example
 	redirectURI = "http://localhost:8085/oauth/callback"
+	// Keycloak CA certificate file
+	keycloakCAFile = "keycloak-ca.pem"
 )
+
+// createKeycloakHTTPClient creates an HTTP client with custom TLS configuration for Keycloak
+func createKeycloakHTTPClient() (*http.Client, error) {
+	// Create custom TLS configuration
+	tlsConfig := &tls.Config{}
+
+	// Try to load the CA certificate if it exists
+	if _, err := os.Stat(keycloakCAFile); err == nil {
+		caCert, err := os.ReadFile(keycloakCAFile)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read CA certificate: %w", err)
+		}
+
+		caCertPool := x509.NewCertPool()
+		if !caCertPool.AppendCertsFromPEM(caCert) {
+			return nil, fmt.Errorf("failed to parse CA certificate")
+		}
+
+		tlsConfig.RootCAs = caCertPool
+		log.Printf("Loaded custom CA certificate for Keycloak from %s", keycloakCAFile)
+	} else {
+		log.Printf("Warning: CA certificate not found at %s, using system CA bundle", keycloakCAFile)
+		log.Printf("If using self-signed certificates, add the CA certificate to %s", keycloakCAFile)
+	}
+
+	return &http.Client{
+		Timeout: 30 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: tlsConfig,
+		},
+	}, nil
+}
 
 func main() {
 	// Create a token store to persist tokens
@@ -27,16 +65,24 @@ func main() {
 	// Create OAuth configuration
 	oauthConfig := client.OAuthConfig{
 		// Client ID can be empty if using dynamic registration
-		ClientID:     os.Getenv("MCP_CLIENT_ID"),
-		ClientSecret: os.Getenv("MCP_CLIENT_SECRET"),
-		RedirectURI:  redirectURI,
-		Scopes:       []string{"mcp.read", "mcp.write"},
-		TokenStore:   tokenStore,
-		PKCEEnabled:  true, // Enable PKCE for public clients
+		ClientID:              os.Getenv("MCP_CLIENT_ID"),
+		ClientSecret:          os.Getenv("MCP_CLIENT_SECRET"),
+		RedirectURI:           redirectURI,
+		Scopes:                []string{"openid", "profile", "email"}, // Use standard OIDC scopes
+		TokenStore:            tokenStore,
+		PKCEEnabled:           true,                                                                    // Enable PKCE for public clients
+		AuthServerMetadataURL: "https://localhost:8443/realms/master/.well-known/openid-configuration", // Point to Keycloak
 	}
 
-	// Create the client with OAuth support
-	c, err := client.NewOAuthStreamableHttpClient(serverURL, oauthConfig)
+	// Create custom HTTP client with Keycloak CA
+	keycloakHTTPClient, err := createKeycloakHTTPClient()
+	if err != nil {
+		log.Fatalf("Failed to create Keycloak HTTP client: %v", err)
+	}
+
+	// Create the client with OAuth support and custom HTTP client
+	c, err := client.NewOAuthStreamableHttpClient(serverURL, oauthConfig,
+		transport.WithHTTPBasicClient(keycloakHTTPClient))
 	if err != nil {
 		log.Fatalf("Failed to create client: %v", err)
 	}
@@ -91,15 +137,31 @@ func main() {
 		result.ServerInfo.Version)
 
 	// Now you can use the client as usual
-	// For example, list resources
-	resources, err := c.ListResources(context.Background(), mcp.ListResourcesRequest{})
+	// For example, list tools
+	tools, err := c.ListTools(context.Background(), mcp.ListToolsRequest{})
 	if err != nil {
-		log.Fatalf("Failed to list resources: %v", err)
+		log.Fatalf("Failed to list tools: %v", err)
 	}
 
-	fmt.Println("Available resources:")
-	for _, resource := range resources.Resources {
-		fmt.Printf("- %s\n", resource.URI)
+	fmt.Println("Available tools:")
+	for _, tool := range tools.Tools {
+		fmt.Printf("- %s: %s\n", tool.Name, tool.Description)
+	}
+
+	// Test the hello tool
+	if len(tools.Tools) > 0 {
+		fmt.Printf("\nTesting the '%s' tool...\n", tools.Tools[0].Name)
+		toolResult, err := c.CallTool(context.Background(), mcp.CallToolRequest{
+			Params: mcp.CallToolParams{
+				Name:      tools.Tools[0].Name,
+				Arguments: map[string]any{},
+			},
+		})
+		if err != nil {
+			log.Fatalf("Failed to call tool: %v", err)
+		}
+
+		fmt.Printf("Tool result: %+v\n", toolResult)
 	}
 }
 
@@ -129,10 +191,11 @@ func maybeAuthorize(err error) {
 			log.Fatalf("Failed to generate state: %v", err)
 		}
 
-		err = oauthHandler.RegisterClient(context.Background(), "mcp-go-oauth-example")
-		if err != nil {
-			log.Fatalf("Failed to register client: %v", err)
-		}
+		// we don't want dynamic client registeration against keycloak
+		//err = oauthHandler.RegisterClient(context.Background(), "mcp-go-oauth-example")
+		//if err != nil {
+		//	log.Fatalf("Failed to register client: %v", err)
+		//}
 
 		// Get the authorization URL
 		authURL, err := oauthHandler.GetAuthorizationURL(context.Background(), state, codeChallenge)

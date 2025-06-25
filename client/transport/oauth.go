@@ -3,12 +3,15 @@ package transport
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -124,9 +127,24 @@ func NewOAuthHandler(config OAuthConfig) *OAuthHandler {
 		config.TokenStore = NewMemoryTokenStore()
 	}
 
+	tlsConfig := &tls.Config{}
+
+	// Try to load the CA certificate if it exists
+
+	caCert, _ := os.ReadFile("keycloak-ca.pem")
+
+	caCertPool := x509.NewCertPool()
+	caCertPool.AppendCertsFromPEM(caCert)
+	tlsConfig.RootCAs = caCertPool
+
 	return &OAuthHandler{
-		config:     config,
-		httpClient: &http.Client{Timeout: 30 * time.Second},
+		config: config,
+		httpClient: &http.Client{
+			Timeout: 30 * time.Second,
+			Transport: &http.Transport{
+				TLSClientConfig: tlsConfig,
+			},
+		},
 	}
 }
 

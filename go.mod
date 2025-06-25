@@ -3,6 +3,7 @@ module github.com/mark3labs/mcp-go
 go 1.23
 
 require (
+	github.com/golang-jwt/jwt/v5 v5.2.2
 	github.com/google/uuid v1.6.0
 	github.com/spf13/cast v1.7.1
 	github.com/stretchr/testify v1.9.0
